@@ -1,0 +1,5 @@
+library("tidyverse")
+library(readxl)
+library(rstudioapi)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read_xlsx("Прозорро_продажі_оренда.xlsx")
