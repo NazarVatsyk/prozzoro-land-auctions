@@ -1,0 +1,131 @@
+---
+title: "Prozzoro-land-market"
+author: "NazarVatsyk"
+date: "2026-09-23"
+output: html_document
+runtime: shiny
+---
+Reading data
+```{r}
+library("tidyverse")
+library(readxl)
+library(rstudioapi)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read_xlsx("Прозорро_продажі_оренда.xlsx")
+```
+
+
+```{r}
+df <- df%>%
+  mutate(code = `КВЦПЗ код класифікатора товару`)
+df%>%
+  select(code,`КВЦПЗ опис класифікатора товару`)%>%
+  unique()%>%
+  arrange(code)
+```
+Поглянемо на розподіл цін за категоріями
+```{r}
+df%>%
+  group_by(code)%>%
+  summarize(mean_price = mean(`Дохід`),
+            Q25 = quantile(`Дохід`,0.25),
+            median_price = median(`Дохід`),
+            Q75 = quantile(`Дохід`,0.75),
+            sd_price = sd(`Дохід`))%>%
+  arrange(median_price)%>%
+  print()
+
+
+```
+Однак у відриві ці дані мало про що кажуть, адже розмір ділянки, доцільної для певної
+господарської діяльності може бути різним, що безперечно впливає на ціну. 
+Гляньмо описову статистику ціни ща гектар
+```{r}
+price_per_ha_descriptive_stats <- df%>%
+  group_by(code)%>%
+  summarize(mean_price = mean(price_lease_ha),
+            Q25 = quantile(price_lease_ha,0.25),
+            median_price = median(price_lease_ha),
+            Q75 = quantile(price_lease_ha,0.75),
+            sd_price = sd(price_lease_ha))%>%
+  arrange(median_price)%>%
+  print()
+```
+
+```{r echo=FALSE, warning=FALSE}
+df%>%
+  ggplot()+
+  geom_density(aes(price_lease_ha))+
+  facet_wrap(~`КВЦПЗ код класифікатора товару`)+
+  xlim(c(0,1e+05))+
+  theme_minimal()
+```
+Чи належать усі вони до одного розподілу? Використаймо тест Колмогорва-Смірнова
+```{r message=TRUE, warning=FALSE}
+codes <- factor(sort(unique(df$code)))
+
+results <- map_df(codes, \(a)
+  map(codes, \(b)
+    tibble( a =  ks.test(
+      df %>% filter(code == a) %>% pull(price_lease_ha),
+      df %>% filter(code == b) %>% pull(price_lease_ha)
+    )$p.val
+    )
+  )
+)$a
+results <- matrix(results,nrow = 16)
+rownames(results) <- codes
+colnames(results) <- codes
+same_dist <- results>0.05
+print(same_dist)
+```
+Також цікаво подивитися на залежність між тривалістю оренди та щорічною вартістю
+за один гектар
+```{r}
+df%>%
+  mutate(year = factor(year, ordered = T))%>%
+  ggplot()+
+  geom_boxplot(aes(x=factor(lease_duration_years_int), y=lease_ha_usd))+
+  theme_minimal()
+```
+На коротших термінах видно багато аутлаєрів, як виглядає картина без них
+```{r}
+df%>%
+  mutate(year = factor(year, ordered = T))%>%
+  ggplot()+
+  geom_boxplot(aes(x=factor(lease_duration_years_int), y=lease_ha_usd), outliers = F)+
+  theme_minimal()
+```
+Бачимо, що вартість короткострокової (до 5 років) оренди суттєво вища, ніж для 
+довгостроковоїЮ але чи є показники які можуть вплинути на ці числа, гляньмо на 
+класифікатор
+```{r}
+df[df$lease_duration_years_int<=5,]%>%
+  group_by(`КВЦПЗ опис класифікатора товару`, code)%>%
+  count()
+```
+Звернімося до матриці same_dist щоб оглянути, чи належать одному розподілу деякі з категорій,
+очевидно, шо перевіряти деякі, n<10 нерелевантно
+```{r}
+print(same_dist[c("1","1.01","1.02","1.03"),c("1","1.01","1.02","1.03")])
+print(results["1.01","1.03"])
+```
+Перевіримо гіпотезу 
+H0: середня вартість короткостроковї оренди така ж, як і довгострокової
+Н1: середня вартість короткострокової оренди вища
+```{r}
+t.test(df%>%filter(lease_duration_years_int<=5)%>%pull(lease_ha_usd),
+       df%>%filter(lease_duration_years_int>5)%>%pull(lease_ha_usd),
+       alternative = "greater")
+qqplot(x= df%>%filter(lease_duration_years_int<5)%>%pull(lease_ha_usd),
+       y= df%>%filter(lease_duration_years_int>=5)%>%pull(lease_ha_usd),
+       xlab = "short_run", ylab = "long_run")
+```
+На QQplot видно точку з ціною вище ніж 800 000, очевидно тут має місце помилка, гляньмо на 
+рядки з найвищими цінами, та перейдемо за посиланнями вказаними в таблиці, й помітимо,
+що на сайті неправильно вказано площу цих об'єктів, виправимо це вручну, та ще раз проведемо
+статистичний тест
+```{r}
+(df%>%arrange(desc(lease_ha_usd))%>%head(4))
+df[df$lease_ha_usd>1.5e+05,"Площа земельної ділянки, ГА"] <- c(1,0.2824,0.12)
+
