@@ -18,7 +18,7 @@ df <- read_xlsx("Прозорро_продажі_оренда.xlsx")
 ```{r}
 df <- df%>%
   mutate(code = `КВЦПЗ код класифікатора товару`)
-df%>%
+kvcpz <- df%>%
   select(code,`КВЦПЗ опис класифікатора товару`)%>%
   unique()%>%
   arrange(code)
@@ -79,14 +79,22 @@ colnames(results) <- codes
 same_dist <- results>0.05
 print(same_dist)
 ```
-Також цікаво подивитися на залежність між тривалістю оренди та щорічною вартістю
-за один гектар
+На графіках видно точку з ціною вище ніж 800 000, очевидно тут має місце помилка, гляньмо на 
+рядки з найвищими цінами, та перейдемо за посиланнями вказаними в таблиці, й помітимо,
+що на сайті неправильно вказано площу цих об'єктів, виправимо це вручну.
+```{r}
+df[df$lease_ha_usd>1.5e+05,"Площа земельної ділянки, ГА"] <- c(1,0.2824,0.12)
+df$price_lease_ha <- df$Дохід/df$`Площа земельної ділянки, ГА`
+df$lease_ha_usd <- df$price_lease_ha/df$USD_rate
+df$lease_ha_eur <- df$price_lease_ha/df$EUR_rate
+```
 ```{r}
 df%>%
   mutate(year = factor(year, ordered = T))%>%
   ggplot()+
   geom_boxplot(aes(x=factor(lease_duration_years_int), y=lease_ha_usd))+
   theme_minimal()
+
 ```
 На коротших термінах видно багато аутлаєрів, як виглядає картина без них
 ```{r}
@@ -96,13 +104,15 @@ df%>%
   geom_boxplot(aes(x=factor(lease_duration_years_int), y=lease_ha_usd), outliers = F)+
   theme_minimal()
 ```
-Бачимо, що вартість короткострокової (до 5 років) оренди суттєво вища, ніж для 
+Бачимо, що вартість короткострокової (до 5 років) оренди візуально вища, ніж для 
 довгостроковоїЮ але чи є показники які можуть вплинути на ці числа, гляньмо на 
 класифікатор
 ```{r}
-df[df$lease_duration_years_int<=5,]%>%
-  group_by(`КВЦПЗ опис класифікатора товару`, code)%>%
-  count()
+df%>%
+  group_by(code)%>%
+  summarize(n = sum(lease_duration_years_int<=5),
+            share = round(mean(lease_duration_years_int<=5),digits=3))%>%
+  arrange(desc(share))
 ```
 Звернімося до матриці same_dist щоб оглянути, чи належать одному розподілу деякі з категорій,
 очевидно, шо перевіряти деякі, n<10 нерелевантно
@@ -116,16 +126,164 @@ H0: середня вартість короткостроковї оренди 
 ```{r}
 t.test(df%>%filter(lease_duration_years_int<=5)%>%pull(lease_ha_usd),
        df%>%filter(lease_duration_years_int>5)%>%pull(lease_ha_usd),
-       alternative = "greater")
+       alternative = "greater") # p-value = 0.5266 насправді довгострокова вище
 qqplot(x= df%>%filter(lease_duration_years_int<5)%>%pull(lease_ha_usd),
        y= df%>%filter(lease_duration_years_int>=5)%>%pull(lease_ha_usd),
        xlab = "short_run", ylab = "long_run")
 ```
-На QQplot видно точку з ціною вище ніж 800 000, очевидно тут має місце помилка, гляньмо на 
-рядки з найвищими цінами, та перейдемо за посиланнями вказаними в таблиці, й помітимо,
-що на сайті неправильно вказано площу цих об'єктів, виправимо це вручну, та ще раз проведемо
-статистичний тест
+
+Подивимося наскільки корелює вартість оренди та НГО
 ```{r}
-(df%>%arrange(desc(lease_ha_usd))%>%head(4))
-df[df$lease_ha_usd>1.5e+05,"Площа земельної ділянки, ГА"] <- c(1,0.2824,0.12)
+df%>%
+  ggplot()+
+  geom_point(aes(x=`Нормативна грошова оцінка`, y = Дохід))+
+  xlim(c(0,4.5e+07))+
+  theme_minimal()+
+  labs(title = "Вартість оренди та НГО", 
+       subtitle = paste("коефіцієнт корреляції =",
+                        round(cor(df$`Нормативна грошова оцінка`,df$Дохід, method = "pearson"),3)))
+```
+
+
+```{r}
+df%>%
+  mutate(NhoYearHa=((`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/lease_duration_years_int)/USD_rate)%>%
+  mutate(rent_less_than_nho = NhoYearHa>lease_ha_usd)%>%
+  filter(NhoYearHa!=0)%>%
+  ggplot()+
+  geom_point(aes(x=NhoYearHa, y = lease_ha_usd, colour = rent_less_than_nho))+
+  geom_abline(aes(intercept = 0, slope=1))+
+  theme_minimal()+
+  xlim(c(0,30000))
+  
+```
+тут видно цілий кластер значень, де НГО за гектар поділене на термін оренди в доларах
+"кучкується" біля нуля, що може вказувати на помилку в даних, перевірка сайтів 
+з екстримально низькими NhoYearHa підтверджує гіпотезу: на сайті була вказана неправильна
+площа
+```{r}
+df <- df%>%
+  mutate(nAgents = if_else(`Кількість пропозицій`>15, '15+', as.character(`Кількість пропозицій`)))%>%
+  mutate(nAgents = factor(nAgents, levels = c("1","2","3","4","5",
+                                              "6","7","8","9","10",
+                                              "11","12","13","14","15",
+                                              "15+"), ordered = T))
+df%>%
+  ggplot()+
+  geom_boxplot(aes(x = nAgents, lease_ha_usd), outliers = F)+
+  theme_minimal()+
+  labs(title = "Розподіл ціни за гектар у доларах від кількості учасників аукціону")
+  
+```
+Це може пояснюватися тим, що середня нормативна грошова оцінка лотів, на аукціонах
+з великою кількістю учасників вища. Перевіримо це припущення
+```{r}
+df%>%
+  mutate(nho_per_ha_usd = (`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/USD_rate)%>%
+  ggplot()+
+  geom_boxplot(aes(x = nAgents, y = nho_per_ha_usd), outliers = F)+
+  theme_minimal()+
+  labs(title = "Розподіл НГО за гектар у доларах від кількості учасників аукціону")
+```
+У відносних показниках оцінка не настільки разюча, а що стосовно абсолютних?
+```{r}
+df%>%
+  mutate(nAgents = if_else(`Кількість пропозицій`>15, '15+', as.character(`Кількість пропозицій`)))%>%
+  mutate(nAgents = factor(nAgents, levels = c("1","2","3","4","5",
+                                              "6","7","8","9","10",
+                                              "11","12","13","14","15",
+                                              "15+"), ordered = T))%>%
+  ggplot()+
+  geom_boxplot(aes(x = nAgents, y=`Нормативна грошова оцінка`), outliers = F)+
+  geom_point(data = df%>%
+               group_by(nAgents)%>%
+               summarize(`Нормативна грошова оцінка` = mean(`Нормативна грошова оцінка`)),
+             aes(x = nAgents, y = `Нормативна грошова оцінка`), colour = "red")+
+  theme_minimal()+
+  labs(title = "Розподіл НГО від кількості учасників аукціону",
+       caption = "Червоні точки - середнє арифметичне")
+```
+гляньмо на коефіцієнт кореляції
+```{r}
+cor(df%>%
+      pull(`Площа земельної ділянки, ГА`),
+    df%>%
+      pull(`Кількість пропозицій`), method = "pearson") #no correlation
+
+cor(df%>%
+      pull(lease_ha_usd),
+    df%>%
+      pull(`Кількість пропозицій`), method = "pearson") #0.2541 weak correlation
+
+cor(df%>%
+      mutate(nho_per_ha_usd = (`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/USD_rate)%>%
+      pull(nho_per_ha_usd),
+    df%>%pull(`Кількість пропозицій`)) #no correlation
+```
+Тобто існує лише слабка кореляція між ціною та кількістю пропозицій
+А чи генерують більше учасників вищу різницю між мінімальною пропозицією
+та пропозицією переможця?
+```{r}
+df%>%
+  ggplot()+
+  geom_boxplot(aes(x = nAgents, y= `price_change%`), outliers = F)+
+  theme_minimal()
+```
+
+```{r}
+is_greater <- map_dbl(2:16, ~ wilcox.test(df%>%
+                              filter(nAgents==levels(nAgents)[.x])%>%
+                              pull(`price_change%`),
+                            df%>%
+                              filter(nAgents==levels(nAgents)[.x-1])%>%
+                              pull(`price_change%`),
+                            alternative = "greater"
+                            )$p.val
+        )<0.05
+temp <- tibble(nAgents = factor(levels(df$nAgents), levels = levels(df$nAgents),ordered=T),
+               stochastically_greater = c(NA, is_greater))
+
+df%>%
+  left_join(temp, by = join_by(nAgents==nAgents))%>%
+  ggplot()+
+  geom_boxplot(aes(x = nAgents, y= `price_change%`, fill=stochastically_greater), outliers = F)+
+  theme_minimal()+
+  labs(title = "Різниця між початковою та фінальною ціною від кількості учасників",
+       subtitle = "p-value Mann-Whitney U-test <0.05")
+
+``` 
+Подивимося на різницю між аукціонами, де переможець - юридична чи фізична особа.
+```{r}
+df <- df%>%
+  mutate(identificator =  `Тип ідентифікатора`)%>%
+  mutate(winner = case_when(identificator=="ЄДРПОУ"~ "ТОВ",
+                            identificator=="ІПН/РНОКПП"~ "фізична особа",
+                            .default = "ФОП"))
+df%>%
+  ggplot()+
+  geom_density(aes(x = `Площа земельної ділянки, ГА`, 
+                   fill = winner, colour = winner), alpha = 0.2)+
+  xlim(c(0,50))+
+  theme_minimal()
+```
+Припускаючи, що у володінні ТОВ має бути більше земель, перевіримо, чи працює
+економія на масштабі, тобто на скільки більше вони готові переплачувати 
+```{r}
+df%>%
+  ggplot()+
+  geom_boxplot(aes(x = fct_reorder(winner, `price_change%`, median),
+                   y = `price_change%`, fill = winner), outliers = F)+
+  geom_point(data = (df%>%
+                       group_by(winner)%>%
+                       summarize(`price_change%` = mean(`price_change%`))),
+             aes(x=winner, y = `price_change%`), size = 2)+
+  labs(title = "Наскільки переплачують переможці",
+       caption = "Точками позначено середнє значення",
+       x = "winner")+
+  theme_minimal()
+```
+```{r}
+
+
+```
 
