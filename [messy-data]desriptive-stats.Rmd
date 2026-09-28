@@ -4,42 +4,55 @@ author: "NazarVatsyk"
 date: "2026-09-23"
 output: html_document
 runtime: shiny
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
+
 Reading data
+
 ```{r}
+
 library("tidyverse")
 library(readxl)
 library(rstudioapi)
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-df <- read_xlsx("Прозорро_продажі_оренда.xlsx")
+library(janitor)
+library(cluster)
+library(fixest)
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+df <- read_xlsx("Прозорро_продажі_оренда.xlsx")%>%
+  janitor::clean_names()
 ```
-
 
 ```{r}
 df <- df%>%
-  mutate(code = `КВЦПЗ код класифікатора товару`)
+  mutate(code = kvcpz_kod_klasifikatora_tovaru)
 kvcpz <- df%>%
-  select(code,`КВЦПЗ опис класифікатора товару`)%>%
+  select(code,kvcpz_opis_klasifikatora_tovaru)%>%
   unique()%>%
   arrange(code)
 ```
+
 Поглянемо на розподіл цін за категоріями
+
 ```{r}
 df%>%
   group_by(code)%>%
-  summarize(mean_price = mean(`Дохід`),
-            Q25 = quantile(`Дохід`,0.25),
-            median_price = median(`Дохід`),
-            Q75 = quantile(`Дохід`,0.75),
-            sd_price = sd(`Дохід`))%>%
+  summarize(mean_price = mean(dohid),
+            Q25 = quantile(dohid,0.25),
+            median_price = median(dohid),
+            Q75 = quantile(dohid,0.75),
+            sd_price = sd(dohid))%>%
   arrange(median_price)%>%
   print()
 
 
 ```
-Однак у відриві ці дані мало про що кажуть, адже розмір ділянки, доцільної для певної
-господарської діяльності може бути різним, що безперечно впливає на ціну. 
-Гляньмо описову статистику ціни ща гектар
+
+Однак у відриві ці дані мало про що кажуть, адже розмір ділянки,
+доцільної для певної господарської діяльності може бути різним, що
+безперечно впливає на ціну. Гляньмо описову статистику ціни ща гектар
+
 ```{r}
 price_per_ha_descriptive_stats <- df%>%
   group_by(code)%>%
@@ -56,38 +69,48 @@ price_per_ha_descriptive_stats <- df%>%
 df%>%
   ggplot()+
   geom_density(aes(price_lease_ha))+
-  facet_wrap(~`КВЦПЗ код класифікатора товару`)+
+  facet_wrap(~kvcpz_kod_klasifikatora_tovaru)+
   xlim(c(0,1e+05))+
   theme_minimal()
 ```
-Чи належать усі вони до одного розподілу? Використаймо тест Колмогорва-Смірнова
+
+Чи належать усі вони до одного розподілу? Використаймо тест
+Крускала-Уолліса та попарні тести Колмогорова-Смірнова
+
 ```{r message=TRUE, warning=FALSE}
 codes <- factor(sort(unique(df$code)))
+kw <- df %>%
+  group_by(code) %>%
+  filter(n() >= 30) %>%
+  ungroup() %>%
+  kruskal.test(lease_ha_usd ~ factor(code), data = .)
 
-results <- map_df(codes, \(a)
-  map(codes, \(b)
-    tibble( a =  ks.test(
-      df %>% filter(code == a) %>% pull(price_lease_ha),
-      df %>% filter(code == b) %>% pull(price_lease_ha)
-    )$p.val
-    )
-  )
-)$a
-results <- matrix(results,nrow = 16)
-rownames(results) <- codes
-colnames(results) <- codes
-same_dist <- results>0.05
-print(same_dist)
+kw$statistic / (nrow(df %>%
+                      group_by(code) %>%
+                      filter(n() >= 30) %>%
+                      ungroup()) - 1)
 ```
-На графіках видно точку з ціною вище ніж 800 000, очевидно тут має місце помилка, гляньмо на 
-рядки з найвищими цінами, та перейдемо за посиланнями вказаними в таблиці, й помітимо,
-що на сайті неправильно вказано площу цих об'єктів, виправимо це вручну.
+Відношення міжгрупової мінливості до загальної становить всього 0.019, що не
+дозволяє нам стверджувати про наявність значущої різниці між групами
 ```{r}
-df[df$lease_ha_usd>1.5e+05,"Площа земельної ділянки, ГА"] <- c(1,0.2824,0.12)
-df$price_lease_ha <- df$Дохід/df$`Площа земельної ділянки, ГА`
-df$lease_ha_usd <- df$price_lease_ha/df$USD_rate
-df$lease_ha_eur <- df$price_lease_ha/df$EUR_rate
+results<- pairwise.wilcox.test(df$lease_ha_usd, df$code, p.adjust.method = "holm")$p.value
+not_signif <- results>0.05
+print(not_signif)
+mean(not_signif, na.rm =T)
 ```
+
+На графіках видно точку з ціною вище ніж 800 000, очевидно тут має місце
+помилка, гляньмо на рядки з найвищими цінами, та перейдемо за
+посиланнями вказаними в таблиці, й помітимо, що на сайті неправильно
+вказано площу цих об'єктів, виправимо це вручну.
+
+```{r}
+df[df$lease_ha_usd>1.5e+05,"plosa_zemel_noi_dilanki_ga"] <- c(1,0.2824,0.12)
+df$price_lease_ha <- df$dohid/df$plosa_zemel_noi_dilanki_ga
+df$lease_ha_usd <- df$price_lease_ha/df$usd_rate
+df$lease_ha_eur <- df$price_lease_ha/df$eur_rate
+```
+
 ```{r}
 df%>%
   mutate(year = factor(year, ordered = T))%>%
@@ -96,7 +119,9 @@ df%>%
   theme_minimal()
 
 ```
+
 На коротших термінах видно багато аутлаєрів, як виглядає картина без них
+
 ```{r}
 df%>%
   mutate(year = factor(year, ordered = T))%>%
@@ -104,9 +129,11 @@ df%>%
   geom_boxplot(aes(x=factor(lease_duration_years_int), y=lease_ha_usd), outliers = F)+
   theme_minimal()
 ```
-Бачимо, що вартість короткострокової (до 5 років) оренди візуально вища, ніж для 
-довгостроковоїЮ але чи є показники які можуть вплинути на ці числа, гляньмо на 
-класифікатор
+
+Бачимо, що вартість короткострокової (до 5 років) оренди візуально вища,
+ніж для довгостроковоїЮ але чи є показники які можуть вплинути на ці
+числа, гляньмо на класифікатор
+
 ```{r}
 df%>%
   group_by(code)%>%
@@ -114,56 +141,49 @@ df%>%
             share = round(mean(lease_duration_years_int<=5),digits=3))%>%
   arrange(desc(share))
 ```
-Звернімося до матриці same_dist щоб оглянути, чи належать одному розподілу деякі з категорій,
-очевидно, шо перевіряти деякі, n<10 нерелевантно
-```{r}
-print(same_dist[c("1","1.01","1.02","1.03"),c("1","1.01","1.02","1.03")])
-print(results["1.01","1.03"])
-```
-Перевіримо гіпотезу 
-H0: середня вартість короткостроковї оренди така ж, як і довгострокової
-Н1: середня вартість короткострокової оренди вища
+
+Перевіримо гіпотезу H0: середня вартість короткостроковї оренди така ж,
+як і довгострокової Н1: середня вартість короткострокової оренди вища
+
 ```{r}
 t.test(df%>%filter(lease_duration_years_int<=5)%>%pull(lease_ha_usd),
        df%>%filter(lease_duration_years_int>5)%>%pull(lease_ha_usd),
-       alternative = "greater") # p-value = 0.5266 насправді довгострокова вище
+       alternative = "less") # p-value = 0.4734 
 qqplot(x= df%>%filter(lease_duration_years_int<5)%>%pull(lease_ha_usd),
        y= df%>%filter(lease_duration_years_int>=5)%>%pull(lease_ha_usd),
        xlab = "short_run", ylab = "long_run")
 ```
 
 Подивимося наскільки корелює вартість оренди та НГО
+
 ```{r}
 df%>%
   ggplot()+
-  geom_point(aes(x=`Нормативна грошова оцінка`, y = Дохід))+
+  geom_point(aes(x=normativna_grosova_ocinka, y = dohid))+
   xlim(c(0,4.5e+07))+
   theme_minimal()+
   labs(title = "Вартість оренди та НГО", 
        subtitle = paste("коефіцієнт корреляції =",
-                        round(cor(df$`Нормативна грошова оцінка`,df$Дохід, method = "pearson"),3)))
+                        round(cor(df$normativna_grosova_ocinka,df$dohid, method = "pearson"),3)))
 ```
-
 
 ```{r}
 df%>%
-  mutate(NhoYearHa=((`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/lease_duration_years_int)/USD_rate)%>%
-  mutate(rent_less_than_nho = NhoYearHa>lease_ha_usd)%>%
+  filter(normativna_grosova_ocinka>0)%>%
+  mutate(NhoYearHa=((normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga)/usd_rate))%>%
+  mutate(yield = lease_ha_eur/NhoYearHa)%>%
+  mutate(minimal_bid_out_of_nho = vistavlena_vartist/normativna_grosova_ocinka)%>%
   filter(NhoYearHa!=0)%>%
   ggplot()+
-  geom_point(aes(x=NhoYearHa, y = lease_ha_usd, colour = rent_less_than_nho))+
-  geom_abline(aes(intercept = 0, slope=1))+
-  theme_minimal()+
-  xlim(c(0,30000))
-  
+  geom_density(aes(yield-minimal_bid_out_of_nho))+
+  scale_x_log10()+
+  theme_minimal()
 ```
-тут видно цілий кластер значень, де НГО за гектар поділене на термін оренди в доларах
-"кучкується" біля нуля, що може вказувати на помилку в даних, перевірка сайтів 
-з екстримально низькими NhoYearHa підтверджує гіпотезу: на сайті була вказана неправильна
-площа
+
+
 ```{r}
 df <- df%>%
-  mutate(nAgents = if_else(`Кількість пропозицій`>15, '15+', as.character(`Кількість пропозицій`)))%>%
+  mutate(nAgents = if_else(kil_kist_propozicij>15, '15+', as.character(kil_kist_propozicij)))%>%
   mutate(nAgents = factor(nAgents, levels = c("1","2","3","4","5",
                                               "6","7","8","9","10",
                                               "11","12","13","14","15",
@@ -175,68 +195,78 @@ df%>%
   labs(title = "Розподіл ціни за гектар у доларах від кількості учасників аукціону")
   
 ```
-Це може пояснюватися тим, що середня нормативна грошова оцінка лотів, на аукціонах
-з великою кількістю учасників вища. Перевіримо це припущення
+
+Це може пояснюватися тим, що середня нормативна грошова оцінка лотів, на
+аукціонах з великою кількістю учасників вища. Перевіримо це припущення
+
 ```{r}
 df%>%
-  mutate(nho_per_ha_usd = (`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/USD_rate)%>%
+  mutate(nho_per_ha_usd = (normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga)/usd_rate)%>%
   ggplot()+
   geom_boxplot(aes(x = nAgents, y = nho_per_ha_usd), outliers = F)+
   theme_minimal()+
   labs(title = "Розподіл НГО за гектар у доларах від кількості учасників аукціону")
 ```
-У відносних показниках оцінка не настільки разюча, а що стосовно абсолютних?
+
+У відносних показниках оцінка не настільки разюча, а що стосовно
+абсолютних?
+
 ```{r}
 df%>%
-  mutate(nAgents = if_else(`Кількість пропозицій`>15, '15+', as.character(`Кількість пропозицій`)))%>%
+  mutate(nAgents = if_else(kil_kist_propozicij>15, '15+', as.character(kil_kist_propozicij)))%>%
   mutate(nAgents = factor(nAgents, levels = c("1","2","3","4","5",
                                               "6","7","8","9","10",
                                               "11","12","13","14","15",
                                               "15+"), ordered = T))%>%
   ggplot()+
-  geom_boxplot(aes(x = nAgents, y=`Нормативна грошова оцінка`), outliers = F)+
+  geom_boxplot(aes(x = nAgents, y=normativna_grosova_ocinka), outliers = F)+
   geom_point(data = df%>%
                group_by(nAgents)%>%
-               summarize(`Нормативна грошова оцінка` = mean(`Нормативна грошова оцінка`)),
-             aes(x = nAgents, y = `Нормативна грошова оцінка`), colour = "red")+
+               summarize(normativna_grosova_ocinka = mean(normativna_grosova_ocinka)),
+             aes(x = nAgents, y = normativna_grosova_ocinka), colour = "red")+
   theme_minimal()+
   labs(title = "Розподіл НГО від кількості учасників аукціону",
        caption = "Червоні точки - середнє арифметичне")
 ```
+
 гляньмо на коефіцієнт кореляції
+
 ```{r}
 cor(df%>%
-      pull(`Площа земельної ділянки, ГА`),
+      pull(plosa_zemel_noi_dilanki_ga),
     df%>%
-      pull(`Кількість пропозицій`), method = "pearson") #no correlation
+      pull(kil_kist_propozicij), method = "spearman") #0.31
 
 cor(df%>%
       pull(lease_ha_usd),
     df%>%
-      pull(`Кількість пропозицій`), method = "pearson") #0.2541 weak correlation
+      pull(kil_kist_propozicij), method = "spearman") #0.6139
 
 cor(df%>%
-      mutate(nho_per_ha_usd = (`Нормативна грошова оцінка`/`Площа земельної ділянки, ГА`)/USD_rate)%>%
+      mutate(nho_per_ha_usd = (normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga)/usd_rate)%>%
       pull(nho_per_ha_usd),
-    df%>%pull(`Кількість пропозицій`)) #no correlation
+    df%>%pull(kil_kist_propozicij), method = "spearman") #no correlation
+cor(df$lease_duration_years_int, df$lease_ha_usd, method = "spearman") #no correlation
 ```
-Тобто існує лише слабка кореляція між ціною та кількістю пропозицій
-А чи генерують більше учасників вищу різницю між мінімальною пропозицією
-та пропозицією переможця?
+
+Тобто існує лише слабка кореляція між ціною та кількістю пропозицій А чи
+генерують більше учасників вищу різницю між мінімальною пропозицією та
+пропозицією переможця?
+
 ```{r}
 df%>%
   ggplot()+
-  geom_boxplot(aes(x = nAgents, y= `price_change%`), outliers = F)+
+  geom_boxplot(aes(x = nAgents, y= price_change_percent), outliers = F)+
   theme_minimal()
 ```
 
 ```{r}
 is_greater <- map_dbl(2:16, ~ wilcox.test(df%>%
                               filter(nAgents==levels(nAgents)[.x])%>%
-                              pull(`price_change%`),
+                              pull(price_change_percent),
                             df%>%
                               filter(nAgents==levels(nAgents)[.x-1])%>%
-                              pull(`price_change%`),
+                              pull(price_change_percent),
                             alternative = "greater"
                             )$p.val
         )<0.05
@@ -246,44 +276,561 @@ temp <- tibble(nAgents = factor(levels(df$nAgents), levels = levels(df$nAgents),
 df%>%
   left_join(temp, by = join_by(nAgents==nAgents))%>%
   ggplot()+
-  geom_boxplot(aes(x = nAgents, y= `price_change%`, fill=stochastically_greater), outliers = F)+
+  geom_boxplot(aes(x = nAgents, y= price_change_percent, fill=stochastically_greater), outliers = F)+
   theme_minimal()+
   labs(title = "Різниця між початковою та фінальною ціною від кількості учасників",
-       subtitle = "p-value Mann-Whitney U-test <0.05")
+       caption = " Mann-Whitney U-test p-value < 0.05")
 
-``` 
-Подивимося на різницю між аукціонами, де переможець - юридична чи фізична особа.
+```
+
+Подивимося на різницю між аукціонами, де переможець - юридична чи
+фізична особа.
+
 ```{r}
 df <- df%>%
-  mutate(identificator =  `Тип ідентифікатора`)%>%
-  mutate(winner = case_when(identificator=="ЄДРПОУ"~ "ТОВ",
-                            identificator=="ІПН/РНОКПП"~ "фізична особа",
-                            .default = "ФОП"))
+  mutate(identificator =  tip_identifikatora)%>%
+  mutate(winner = case_when(
+    str_detect(str_to_upper(peremozec), "ФЕРМЕРСЬК") ~ "ФГ",
+    str_detect(str_to_upper(peremozec), "ТОВАРИСТВО З ОБМЕЖЕНОЮ") ~ "ТОВ",
+    str_detect(str_to_upper(peremozec), "ПРИВАТНЕ .*ПІДПРИЄМСТВО") ~ "ПП",
+    tip_identifikatora=="ЄДРПОУ" ~ "інша юрособа",
+    tip_identifikatora=="ІПН/РНОКПП (ФОП)" ~ "ФОП",
+    tip_identifiktora %in% c("ІПН/РНОКПП", "Паспорт") ~ "фізична особа",
+    .default = "іноземна"))
 df%>%
   ggplot()+
-  geom_density(aes(x = `Площа земельної ділянки, ГА`, 
+  geom_density(aes(x = plosa_zemel_noi_dilanki_ga, 
                    fill = winner, colour = winner), alpha = 0.2)+
   xlim(c(0,50))+
+  facet_wrap(~winner)+
   theme_minimal()
 ```
-Припускаючи, що у володінні ТОВ має бути більше земель, перевіримо, чи працює
-економія на масштабі, тобто на скільки більше вони готові переплачувати 
+
+Припускаючи, що у володінні ТОВ має бути більше земель, перевіримо, чи
+працює економія на масштабі, тобто на скільки більше вони готові
+переплачувати
+
 ```{r}
 df%>%
   ggplot()+
-  geom_boxplot(aes(x = fct_reorder(winner, `price_change%`, median),
-                   y = `price_change%`, fill = winner), outliers = F)+
+  geom_boxplot(aes(x = fct_reorder(winner, price_change_percent, median),
+                   y = price_change_percent, fill = winner), outliers = F)+
   geom_point(data = (df%>%
                        group_by(winner)%>%
-                       summarize(`price_change%` = mean(`price_change%`))),
-             aes(x=winner, y = `price_change%`), size = 2)+
+                       summarize(price_change_percent = mean(price_change_percent))),
+             aes(x=winner, y = price_change_percent), size = 2)+
   labs(title = "Наскільки переплачують переможці",
        caption = "Точками позначено середнє значення",
        x = "winner")+
   theme_minimal()
+kruskal.test(winner ~ price_change_percent, data = df)
 ```
+з графіків здається, наче ці величини прийшли з одного розподілу
+Подивимося на активність за областями
+
+```{r}
+by_oblast <- df%>%
+  group_by(oblast_kadastr)%>%
+  summarize(mean_price = mean(lease_ha_usd),
+            Q25_price = quantile(lease_ha_usd, 0.25),
+            median_price = median(lease_ha_eur),
+            Q75_price = quantile(lease_ha_usd, 0.75),
+            mean_dur = mean(lease_duration_years_int),
+            Q25_dur = quantile(lease_duration_years_int, 0.25),
+            median_dur = median(lease_duration_years_int),
+            Q75_dur = quantile(lease_duration_years_int, 0.75),
+            mean_nho = mean(normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga),
+            Q25_nho = quantile(normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga, 0.25),
+            median_nho = median(normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga),
+            Q75_nho = quantile(normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga, 0.75))%>%
+  arrange(desc(median_price))%>%
+  pivot_longer(
+    cols = -oblast_kadastr,
+    names_to = c("stat", "variable"),
+    names_pattern = "^(mean|Q25|median|Q75)_(.+)$",
+    values_to = "value"
+  ) %>%
+  pivot_wider(names_from = variable, values_from = value)
+print(by_oblast)
+```
+Візуалізуємо деякі зі статистик
+```{r}
+by_oblast%>%
+  ggplot()+
+  geom_point(aes(x = price, y= nho, size = dur),)+
+  facet_wrap(~stat)
+```
+
+Дослідимо вплив війни
+```{r}
+war_exp0 <- c("Херсонська область","Запорізька область","Донецька область",
+                 "Миколаївська область","Сумська область","Харківська область",
+                 "Чернігівська область", "Луганська область","Київська область")
+df <- df%>%
+  mutate(war_exposed = oblast_kadastr %in% war_exp0)
+sum(df$war_exposed)
+df%>%
+  group_by(war_exposed)%>%
+  arrange(data_aukcionu)%>%
+  mutate(mean_lease_ha_price = cummean(lease_ha_usd))%>%
+  ggplot()+
+  geom_line(aes(x = data_aukcionu, y= mean_lease_ha_price, colour = war_exposed))+
+  geom_vline(aes(xintercept = as.POSIXct('2022-02-24')))+
+  theme_minimal()
+```
+
+Виглядає наче середня вартість для регіонів, постраждалих менша,
+перевіримо, чи взагалі ці величини залежні. 
+H0: Ціна не залежить від
+безпекової ситуації в регіоні 
+Н1: Залежить
+
+```{r}
+wilcox.test(
+  df%>%
+  filter(data_aukcionu > as.POSIXct("2022-02-24") & war_exposed == T)%>%
+  pull(lease_ha_usd),
+  df%>%
+  filter(data_aukcionu > as.POSIXct("2022-02-24") & war_exposed == F)%>%
+  pull(lease_ha_usd), alternative = "less"
+  )
+```
+
+Можливо, це зумовлено тим, що найдорожчі регіони (насамперед Галичина)
+не постраждали від війни. Варто подивитися наскільки відрізняється
+різниця в довоєнних та післявоєнних цінах у різних регіонах, повернімося до цього
+пізніше
+
+Чи змінилася з війною тривалість оренди
+
+```{r}
+df%>%
+  mutate(quarter = case_when(month%%12<=3~"Q1",
+                            month%%12<=6~"Q2",
+                            month%%12<=9~"Q3",
+                            .default = "Q4"),
+         year_quarter = paste(year, "\n", quarter))%>%
+  group_by(war_exposed, year_quarter)%>%
+  summarize(mean = mean(lease_duration_years_int, na.rm=T),
+            median = median(lease_duration_years_int, na.rm=T),
+            Q25 = quantile(lease_duration_years_int,0.25,na.rm=T),
+            Q75 = quantile(lease_duration_years_int,0.75,na.rm=T),
+            sd = sd(lease_duration_years_int,na.rm=T))%>%
+  ungroup()%>%
+  pivot_longer(mean:sd, names_to =  "statistics",  values_to = "values")%>%
+  ggplot()+
+  geom_point(aes(x = year_quarter, y = values, colour= statistics, shape = statistics))+
+  facet_wrap(~war_exposed, nrow=2)+
+  theme_minimal()
+```
+
+H0: Тривалість оренди не залежить від того, чи відбувалися в області
+бойові дії H1: Тривалість оренди залежить від бойових дій
+
+```{r}
+dat <- df %>%
+  filter(data_aukcionu > as.POSIXct("2022-02-24")) %>%
+  select(war_exposed, lease_duration_years_int)
+
+tab <- table(dat$war_exposed, dat$lease_duration_years_int)
+chisq.test(tab)
+```
+
+Для будь-якого порогу p-value<2.2е-16 дозволяє нам стверджувати, що ці
+величини взаємозалежні
+
+
+H0: Тривалість оренди не залежить від бойових дій 
+Н1: оренда в областях,
+що постраждали від війни коротша
+
+```{r}
+warexdurr <- df%>%
+             filter((data_aukcionu>as.POSIXct("2022-02-24")) &
+                      (war_exposed==T))%>%
+             pull(lease_duration_years_int)
+nonwarexdurr <- df%>%
+             filter((data_aukcionu>as.POSIXct("2022-02-24")) &
+                      (war_exposed==F))%>%
+             pull(lease_duration_years_int)
+            
+wilcox.test(warexdurr,nonwarexdurr, alternative = "less")
+```
+
+При тому з описової статистики здається, наче ситуація змінилася з
+точністю до навпаки десь у 2025 році
+
+```{r}
+warexdurr <- df%>%
+             filter((data_aukcionu>as.POSIXct("2025-01-01")) &
+                      (war_exposed==T))%>%
+             pull(lease_duration_years_int)
+nonwarexdurr <- df%>%
+             filter((data_aukcionu>as.POSIXct("2025-01-01")) &
+                      (war_exposed==F))%>%
+             pull(lease_duration_years_int)
+            
+wilcox.test(warexdurr,nonwarexdurr, alternative = "greater")
+```
+
+Використовуючи модель Claude Opus 5.5 для перевірки відповідності
+таблиці, до даних на сайті, отримали таблицю з помилками парсингу, ручна
+перевірка підтверджує помилки
+
+```{r}
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+errors <- read_csv("Прозорро_продажі_оренда_перевірено.csv",locale = locale(encoding = "UTF-8"))%>%clean_names()
+df <- df%>%clean_names()
+tidy_df <- df %>%
+  left_join(errors, join_by(posilanna_na_portal==posilanna))%>%
+  mutate(
+    plosa_zemel_noi_dilanki_ga = coalesce(plosa_z_nazvi_ga, plosa_zemel_noi_dilanki_ga),
+    dohid = coalesce(real_nij_dohid, dohid),
+    price_change   = dohid - vistavlena_vartist,
+    `price_change_percent` = price_change / vistavlena_vartist,
+    price_lease_ha = dohid / plosa_zemel_noi_dilanki_ga,
+    lease_ha_usd   = price_lease_ha / usd_rate,
+    lease_ha_eur   = price_lease_ha / eur_rate,
+    lease_duration_years_int = case_when(
+    str_detect(`trivalist_orendi`, "^10 р 120") ~ 10,
+    str_detect(`trivalist_orendi`, "^15 р 180") ~ 15,
+    `trivalist_orendi`=="-" ~ NA,
+    .default = lease_duration_years_int)
+  )%>%
+  distinct(kadastrovij_nomer,vkotre_vistavlaet_sa, .keep_all = T)%>%
+  mutate(nho_per_ha = normativna_grosova_ocinka/plosa_zemel_noi_dilanki_ga,
+         rent_to_nho = ifelse(normativna_grosova_ocinka!=0,
+                              dohid/normativna_grosova_ocinka,
+                              NA),
+         start_to_nho = ifelse(normativna_grosova_ocinka!=0,
+                              vistavlena_vartist/normativna_grosova_ocinka,
+                              NA))
+  
+```
+Тут є три кластери помилок: неправильно перенесена дата, неправильно запарсена
+площа, зміна ціни через відмову переможця, дуплікати одних й тих ж аукціонів
+
+Сама по собі інформація, про відмову може бути надзвичайно корисною для
+нас
+
+```{r}
+df%>%
+  left_join(errors, join_by(posilanna_na_portal==posilanna)) %>%
+  filter(!is.na(real_nij_dohid))%>%
+  ggplot()+
+  geom_point(aes(x=`real_nij_dohid`,y= dohid),size = 3, alpha = 0.2)+
+  geom_abline(aes(intercept = 0, slope = 1))+
+  geom_segment(aes(xend = real_nij_dohid, y = real_nij_dohid, yend = dohid, x = real_nij_dohid ))+
+  xlim(c(0,5e05))+
+  ylim(c(0,5e05))+
+  theme_minimal()
+```
+
+Але абсолютні значення дають мало інформації, цікавіше дізнатися про
+різницю у відсотках
+
+```{r}
+df%>%
+  left_join(errors, join_by(posilanna_na_portal==posilanna)) %>%
+  filter(!is.na(real_nij_dohid))%>%
+  mutate(`real_change_percent` = (real_nij_dohid- vistavlena_vartist)/vistavlena_vartist)%>%
+  ggplot()+
+  geom_point(aes(y=`price_change_percent`,x= `real_change_percent`),size = 3, alpha = 0.2)+
+  geom_abline(aes(intercept = 0, slope = 1))+
+  geom_segment(aes(xend = `real_change_percent`, y = `real_change_percent`, yend = `price_change_percent`, x = `real_change_percent` ))+
+  theme_minimal()
+```
+
+На графіку ми бачимо лише два випадки реальної переплати відносно другого місця,
+тоді як причину відмови решти складно об'яснити логічно
+
+```{r}
+df%>%
+  ggplot()+
+  geom_boxplot(aes(x = fct_reorder(tip_vlasnosti, price_change_percent, mean), 
+                   y = price_change_percent, fill = tip_vlasnosti),
+               outliers = F)+
+  theme_minimal()
+```
+
+```{r fig.height=7, message=FALSE}
+tidy_df%>%
+  group_by(oblast, year)%>%
+  summarize(n = n(), median_rent_to_nho = median(rent_to_nho, na.rm = T))%>%
+  filter(n>=20)%>%
+  ungroup()%>% # інакше fct_reorder спрацює окремо всередині кожної області
+  mutate(oblast = fct_reorder(oblast, median_rent_to_nho))%>%
+  ggplot()+
+  geom_tile(aes(x = factor(year), y = oblast, fill = median_rent_to_nho))+
+  geom_text(aes(x = factor(year), y = oblast,
+                label = paste0(round(median_rent_to_nho*100), "%")), size = 3)+
+  scale_fill_distiller(palette = "Blues", direction = 1)+
+  theme_minimal()+
+  labs(title = "Медіана від плати / НГО: область × рік", x = NULL, y = NULL,
+       caption = "пропущені клітинки: кількість угод <20")
+```
+
 ```{r}
 
-
+tidy_df%>%
+  ggplot()+
+  geom_boxplot(aes(x = n_agents, y = rent_to_nho), outliers = F)+
+  geom_point(data = tidy_df%>%
+               group_by(n_agents)%>%
+               summarize(rent_to_nho = mean(rent_to_nho, na.rm = T)),
+             aes(x = n_agents, y = rent_to_nho), colour = "red")+
+  scale_y_log10(labels = scales::percent)+
+  theme_minimal()+
+  labs(title = "Орендна плата / НГО від кількості учасників аукціону",
+       caption = "Червоні точки - медіана")
 ```
+Проаналізуємо переможців
+```{r}
+
+winners <- tidy_df%>%
+  group_by(kod_peremozca)%>%
+  summarize(name = first(peremozec),
+            lots = n(),
+            area = sum(plosa_zemel_noi_dilanki_ga))%>%
+  arrange(desc(area))
+```
+Крива Лоренца: наскільки нерівно площа розподілена між переможцями
+```{r}
+lorenz <- winners %>%
+  arrange(area) %>%
+  mutate(cum_winners = row_number() / n(),
+         cum_area    = cumsum(area) / sum(area))
+x <- c(0, lorenz$cum_winners)
+y <- c(0, lorenz$cum_area)
+gini <- 1 - sum(diff(x) * (head(y, -1) + tail(y, -1)))
+
+lorenz%>%
+  ggplot()+
+  geom_line(aes(x = cum_winners, y = cum_area))+
+  geom_abline(aes(intercept = 0, slope = 1), linetype = "dashed")+
+  geom_vline(aes(xintercept = lorenz$cum_winners[which.max(-(lorenz$cum_area-0.25)^2)]),color = "red")+
+  geom_vline(aes(xintercept = lorenz$cum_winners[which.max(-(lorenz$cum_area-0.5)^2)]),color = "red")+
+  geom_vline(aes(xintercept = lorenz$cum_winners[which.max(-(lorenz$cum_area-0.75)^2)]),color = "red")+
+  theme_minimal()+
+  labs(title = "Крива Лоренца: площа між переможцями",
+       subtitle = paste("коефіцієнт Джині ≈", round(gini,3)),
+       x = "частка переможців", y = "частка площі",
+       caption = "червоними лініями відзначено частку власників які володіють 25%, 50%, 75% землі")
+```
+
+```{r}
+
+t.test(tidy_df%>%filter(lease_duration_years_int<=5&lease_ha_usd<300)%>%pull(lease_ha_usd),
+       tidy_df%>%filter(lease_duration_years_int>5&lease_ha_usd<1000)%>%pull(lease_ha_usd),
+       alternative = "less") # p-value < 2.2e-16
+qqplot(x= tidy_df%>%filter(lease_duration_years_int<=5&lease_ha_usd<300)%>%pull(lease_ha_usd),
+       y= tidy_df%>%filter(lease_duration_years_int>5&lease_ha_usd<1000)%>%pull(lease_ha_usd),
+       xlab = "short_run", ylab = "long_run")
+1- mean((tidy_df$lease_duration_years_int<=5&tidy_df$lease_ha_usd<300)|
+          (tidy_df$lease_duration_years_int>5&tidy_df$lease_ha_usd<1000))
+#якщо для 100% даних патерн непомітний, то відкинувши ~200 помилкових та ще 2,164% екстримальних
+#можна стверджувати, що довгострокова оренда дорожча
+```
+
+```{r}
+oblasts <- tidy_df%>%
+  mutate(nho_per_ha_usd = nho_per_ha/usd_rate)%>%
+  filter(nho_per_ha_usd!=0)%>%
+  group_by(oblast)%>%
+  summarize(n = n(),
+            median_price = median(lease_ha_usd),
+
+            median_nho = median(nho_per_ha_usd),
+            mean_agents = mean(kil_kist_propozicij),
+            median_change = median(`price_change_percent`))%>%
+  filter(n >= 30)
+```
+змінні в різних одиницях, тому їх треба стандартизувати, інакше K-means дивитиметься лише на НГО
+```{r}
+X <- scale(oblasts%>%select(median_price, median_nho, mean_agents, median_change))
+```
+Скільки кластерів брати? Метод ліктя та середній silhouette
+```{r}
+set.seed(12)
+k_choice <- tibble(k = 2:8,
+                   wss = map_dbl(2:8, ~ kmeans(X, centers = .x, nstart = 25)$tot.withinss),
+                   silhouette = map_dbl(2:8, ~ mean(silhouette(kmeans(X, centers = .x, nstart = 25)$cluster, dist(X))[,3])))
+print(k_choice)
+k_choice%>%
+  ggplot()+
+  geom_line(aes(x = k, y = wss))+
+  geom_point(aes(x = k, y = wss))+
+  theme_minimal()+
+  labs(title = "Метод ліктя")
+```
+silhouette майже однаковий для всіх k, лікоть приблизно на 4, візьмемо k = 4
+```{r}
+set.seed(12)
+km <- kmeans(X, centers = 4, nstart = 25)
+oblasts$cluster <- factor(km$cluster)
+oblasts%>%
+  arrange(cluster)%>%
+  print(n = 30)
+oblasts%>%
+  group_by(cluster)%>%
+  summarize(n = n(),
+            median_price = mean(median_price),
+            median_nho = mean(median_nho),
+            mean_agents = mean(mean_agents),
+            median_change = mean(median_change),
+)
+```
+
+```{r}
+oblasts%>%
+  ggplot()+
+  geom_point(aes(x = median_nho, y = median_price, colour = cluster, size = n))+
+  geom_text(aes(x = median_nho, y = median_price, label = str_remove(oblast, " область")),
+            vjust = -1, size = 3)+
+  theme_minimal()+
+  labs(title = "Кластери областей за ціною оренди",
+       x = "Медіанна НГО за га, USD", y = "Медіанна ціна оренди за га, USD")
+```
+Кластери через PCA, щоб бачити всі 5 змінних одразу
+```{r}
+pca <- prcomp(X)
+dim(pca$rotation)
+pca$rotation     
+summary(pca)  # перші два вектори пояснюють 90% розкиду
+oblasts%>%
+  mutate(PC1 = pca$x[,1], PC2 = pca$x[,2])%>%
+  ggplot()+
+  geom_point(aes(x = PC1, y = PC2, colour = cluster), size = 3)+
+  geom_text(aes(x = PC1, y = PC2, label = str_remove(oblast, " область")),
+            vjust = -1, size = 3)+
+  theme_minimal()+
+  labs(title = "Області в просторі перших двох головних компонент")
+```
+В результаті тесту Манна-Уітні, проведеного раніше, ми впевнено можемо сказати,
+що під час війни ціна в прифронтових областях дешевша, чи була вона дешевшою і до
+війни,
+```{r}
+wilcox.test(
+  tidy_df%>%
+  filter(data_aukcionu < as.POSIXct("2022-02-24") & war_exposed == T)%>%
+  pull(lease_ha_usd),
+  tidy_df%>%
+  filter(data_aukcionu < as.POSIXct("2022-02-24") & war_exposed == F)%>%
+  pull(lease_ha_usd),
+  alternative = "less")
+```
+На вибірці у 1000 довоєнних аукціонів, ми можемо сказати, що ціна в регіонах, які найбільше страждають від війни була дешевшою, а отже варто дивитися на різницю різниць між сходом і заходом в різні періоди
+```{r}
+did_df <- tidy_df%>%
+  filter(!is.na(lease_ha_usd), lease_ha_usd > 0)%>%
+  mutate(post = data_aukcionu >= as.POSIXct("2022-02-24"),
+         did = war_exposed & post,
+         yq = paste(year(data_aukcionu), quarter(data_aukcionu)))
+
+did_model <- feols(log(lease_ha_usd) ~ did + 
+                     log(plosa_zemel_noi_dilanki_ga) + 
+                     lease_duration_years_int |
+                     oblast_kadastr + yq + code+normativna_grosova_ocinka,
+                   data = did_df, cluster = ~oblast_kadastr)
+summary(did_model)
+```
+І хоч ми бачимо, що коефіцієнт при did -0.114, що означає, що ціна змінилася на
+exp(-0.114663)-1 ~ 11%
+
+Чи відлякує висока стартова ціна учасників? Порахуємо відношення стартової ціни до НГО,
+для 76% лотів воно рівно 12%, тому розіб'ємо його на категорії
+```{r}
+start_df <- tidy_df%>%
+  filter(!is.na(start_to_nho))%>%
+  mutate(start_cat = case_when(start_to_nho < 0.075 ~ "<7.5%",
+                               start_to_nho < 0.095 ~ "7.5-9.5%",
+                               start_to_nho < 0.115 ~ "9.5-11.5%",
+                               start_to_nho <= 0.1205 ~ "12%",
+                               start_to_nho <= 0.3 ~ "12-30%",
+                               .default = ">30%"),
+         start_cat = factor(start_cat, levels = c("<7.5%","7.5-9.5%","9.5-11.5%","12%","12-30%",">30%")),
+         nho_per_ha_usd = nho_per_ha/usd_rate,
+         relist = factor(pmin(vkotre_vistavlaet_sa, 4)),
+         yq = paste(year(data_aukcionu), quarter(data_aukcionu)))
+start_df%>%
+  group_by(start_cat)%>%
+  summarize(n = n(),
+            mean_agents = mean(kil_kist_propozicij),
+            median_nho = median(nho_per_ha_usd),
+            median_rent_to_nho = median(rent_to_nho))
+```
+```{r}
+start_df%>%
+  ggplot()+
+  geom_boxplot(aes(x = start_cat, y = kil_kist_propozicij), outliers = F)+
+  geom_point(data = start_df%>%
+               group_by(start_cat)%>%
+               summarize(kil_kist_propozicij = mean(kil_kist_propozicij)),
+             aes(x = start_cat, y = kil_kist_propozicij), colour = "red")+
+  theme_minimal()+
+  labs(title = "Кількість учасників від стартової ціни відносно НГО",
+       x = "старт / НГО", y = "кількість учасників",
+       caption = "Червоні точки - середнє арифметичне")
+```
+Здається, що при старті 12% учасників навіть більше (3.22 проти ~2.9 при нижчому старті),
+але лоти з нижчим стартом мають дорожчу землю (медіанна НГО 620-680$/га проти 562$),
+схоже, що ради знижують відсоток саме для дорогої землі. Щоб порівнювати однакову землю
+потрібна модель. Кількість учасників - лічильна змінна, тому використаємо регресію Пуассона,
+контролюючи НГО за га, площу, тривалість, котрий раз лот виставляється та мінімальну
+кількість учасників. У першій моделі порівнюємо лоти в межах однієї області, у другій - в
+межах одного організатора (267 рад використовували і 12%, і інший старт)
+
+H0: стартова ціна відносно НГО не впливає на кількість учасників
+Н1: вищий старт відлякує учасників
+```{r}
+bidders_oblast <- fepois(kil_kist_propozicij ~ i(start_cat, ref = "12%") + log(nho_per_ha_usd) +
+                           log(plosa_zemel_noi_dilanki_ga) + lease_duration_years_int + relist +
+                           minimal_na_kil_kist_ucasnikiv |
+                           oblast_kadastr + yq + code,
+                         data = start_df, cluster = ~oblast_kadastr)
+bidders_org <- fepois(kil_kist_propozicij ~ i(start_cat, ref = "12%") + log(nho_per_ha_usd) +
+                        log(plosa_zemel_noi_dilanki_ga) + lease_duration_years_int + relist +
+                        minimal_na_kil_kist_ucasnikiv |
+                        kod_organizatora + yq + code,
+                      data = start_df, cluster = ~oblast_kadastr)
+etable(bidders_oblast, bidders_org)
+```
+Коефіцієнти Пуассона переведемо у відсотки: exp(b) - 1
+```{r}
+coeftable(bidders_org)%>% 
+  as_tibble(rownames = "term")%>%
+  mutate(model = "FE організатора")%>%
+  filter(str_detect(term, "start_cat"))%>%
+  mutate(term = factor(str_remove(term, "start_cat::"), levels = c("<7.5%","7.5-9.5%","9.5-11.5%","12-30%",">30%")),
+         effect = exp(Estimate) - 1,
+         low = exp(Estimate - 1.96*`Std. Error`) - 1,
+         high = exp(Estimate + 1.96*`Std. Error`) - 1)%>%
+  ggplot()+
+  geom_pointrange(aes(x = term, y = effect, ymin = low, ymax = high, colour = model),
+                  position = position_dodge(width = 0.4))+
+  geom_hline(aes(yintercept = 0), linetype = "dashed")+
+  scale_y_continuous(labels = scales::percent)+
+  theme_minimal()+
+  labs(title = "Зміна кількості учасників відносно старту 12% НГО",
+       x = "старт / НГО", y = NULL,
+       caption = "95% довірчі інтервали, SE кластеризовані по областях")
+```
+Між 7.5% та 30% значущої різниці немає, тобто H0 ми не відхиляємо. Менше учасників лише
+при старті понад 30% НГО (-10% у моделі з FE організатора, -15% з FE області), але медіанна
+НГО там лише 203$/га, тобто НГО, ймовірно, застаріла, а серед цих значень трапляються старти
+понад 100% НГО (максимум 1200%), що схоже на помилки. Також варто пам'ятати, що в даних лише
+аукціони, які відбулися: лотів, на які через високий старт не прийшов ніхто, ми не бачимо.
+Натяк на це дає relist: лоти, виставлені вдруге-вчетверте, збирають на 13-25% менше учасників
+
+Нижчий старт не приваблює більше учасників, а що з підсумковою ціною?
+```{r}
+rent_org <- feols(log(rent_to_nho) ~ i(start_cat, ref = "12%") + log(nho_per_ha_usd) +
+                    log(plosa_zemel_noi_dilanki_ga) + lease_duration_years_int + relist +
+                    minimal_na_kil_kist_ucasnikiv |
+                    kod_organizatora + yq + code,
+                  data = start_df, cluster = ~oblast_kadastr)
+etable(rent_org)
+```
+При старті нижче 7.5% підсумкова плата/НГО на 46% нижча, ніж при 12%, при 7.5-9.5% - на 19%,
+тобто ради, які знижують старт, втрачають дохід, не отримуючи більше конкуренції
 
